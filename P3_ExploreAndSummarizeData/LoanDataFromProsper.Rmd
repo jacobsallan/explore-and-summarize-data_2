@@ -1,0 +1,1086 @@
+---
+title: "Project3: Loan Data From Prosper"
+author: "Allan Jacobs"
+date: "03/30/2015"
+output: html_document
+---
+
+Univariate Plots
+==
+
+The setup requires the library boot.  If you do not have this library,
+please run install.packages('boot').
+
+```{r, echo=FALSE}
+#setwd('/home/allan/workspace/DataSci/src/project3')
+library(ggplot2)
+library(gridExtra)
+library(boot)
+#The library for confidence interval calculations for logistic regression is
+#commented out.
+# library(aod)
+
+# Read in the data
+loans <- read.csv('prosperLoanData.csv')
+
+# Convert date variables to Date format
+loans$ListingCreationDate <- strptime(loans$ListingCreationDate, 
+    format="%Y-%m-%d %H:%M:%S", tz="GMT")
+loans$ClosedDate <- strptime(loans$ClosedDate, 
+    format="%Y-%m-%d %H:%M:%S", tz="GMT")
+loans$DateCreditPulled <- strptime(loans$DateCreditPulled, 
+    format="%Y-%m-%d %H:%M:%S", tz="GMT")
+loans$FirstRecordedCreditLine <- strptime(loans$FirstRecordedCreditLine, 
+    format="%Y-%m-%d %H:%M:%S", tz="GMT")
+loans$LoanOriginationDate <- strptime(loans$LoanOriginationDate, 
+    format="%Y-%m-%d %H:%M:%S", tz="GMT")
+
+# Convert identifiers to character format
+loans$ListingKey <- as.character(loans$ListingKey)
+loans$LoanKey <- as.character(loans$LoanKey)
+loans$MemberKey <- as.character(loans$MemberKey)
+loans$GroupKey <- as.character(loans$GroupKey)
+
+# Convert booleans (originally factors) to logical type
+loans$IsBorrowerHomeowner <- as.logical(loans$IsBorrowerHomeowner)
+loans$CurrentlyInGroup <- as.logical(loans$CurrentlyInGroup)
+loans$IncomeVerifiable <- as.logical(loans$IncomeVerifiable)
+
+# Assign ordering to the remaining Factors.
+loans$CreditGrade <- factor(loans$CreditGrade, 
+    levels(loans$CreditGrade)[c(9,8,7,6,5,4,2,3,1)])
+loans$ProsperRating..Alpha <- factor(loans$ProsperRating..Alpha,
+    levels(loans$ProsperRating..Alpha)[c(8,7,6,5,4,2,3,1)])
+loans$IncomeRange <- factor(loans$IncomeRange,
+    levels(loans$IncomeRange)[c(8,1,3,4,5,6,2,7)])
+loans$LoanStatus <- factor(loans$LoanStatus,
+    levels(loans$LoanStatus)[c(5,2,8,12,11,10,9,7,4,6,3,1)])
+loans$LoanOriginationQuarter <- factor(loans$LoanOriginationQuarter,
+    levels(loans$LoanOriginationQuarter)
+    [c(25,1,9,17,26,2,10,18,27,3,11,19,28,12,20,29,4,13,21,30,5,14,22,31,6,15,
+       23,32,7,16,24,33,8)])
+
+# Convert some columns to integer type.
+loans$ProsperScore <- as.integer(loans$ProsperScore)
+loans$TotalInquiries <- as.integer(loans$TotalInquiries)
+loans$TotalTrades <- as.integer(loans$TotalTrades)
+
+# Break up the Factor variable LoanOriginationQuarter into Year and Quarter.
+loans$Quarter <- as.integer(substring(loans$LoanOriginationQuarter, 2, 2))
+loans$Year <- as.integer(substring(loans$LoanOriginationQuarter, 4,7))
+
+# Generate synthetic variables used in the analysis.
+# SqrtIncomeLoanAmountRatio is dimensionless and approximately normal.  To be
+# used in the logistic model fit.
+loans$SqrtIncomeLoanAmountRatio <-
+    sqrt(loans$StatedMonthlyIncome/loans$LoanOriginalAmount)
+# GLMFit3 is the logistic regression fit using four inputs to predict loan
+# default.
+loans$GLMFit3 <- -4.85412 + 
+                 0.00947 * loans$CreditScoreRangeUpper -
+                 0.01384 * loans$OpenRevolvingAccounts - 
+                 0.11891 * loans$InquiriesLast6Months + 
+                 0.85781 * loans$SqrtIncomeLoanAmountRatio
+
+loans$GLMFit7 <- -3.9950 + 
+                 0.008386 * loans$CreditScoreRangeUpper +
+                 0.02125 * loans$OpenRevolvingAccounts - 
+                 0.1209 * loans$InquiriesLast6Months + 
+                 1.013 * loans$SqrtIncomeLoanAmountRatio -
+                0.009103 * loans$TotalCreditLinespast7years -
+                0.1113 * loans$CurrentDelinquencies +
+                0.009992 * loans$DelinquenciesLast7Years -
+                0.000507 * loans$OpenRevolvingMonthlyPayment
+
+# loansCompleted, loansFinished, and loansCompDef are data frames used
+# repeatedly.
+loansCompleted <- subset(loans, LoanStatus=='Completed')
+loansFinished <- subset(loans, 
+    LoanStatus=='Completed'|LoanStatus=='Chargedoff'|LoanStatus=='Defaulted')
+loansCompleted$CompleteMonths <- as.numeric((loansCompleted$ClosedDate - 
+    loansCompleted$LoanOriginationDate) / (60*60*24*30.42))
+loansCompleted$CompleteDays <- as.numeric((loansCompleted$ClosedDate - 
+    loansCompleted$LoanOriginationDate) / (60*60*24))
+loansCompleted$ActualYield <- 365 * (
+    exp(log((loansCompleted$LP_CustomerPayments + 
+        loansCompleted$LP_ServiceFees + 
+        loansCompleted$LP_NonPrincipalRecoverypayments)/
+    loansCompleted$LoanOriginalAmount)*(1.0/loansCompleted$CompleteDays))-1.0)
+loansCompDef <- subset(loans,LoanStatus=='Completed'|LoanStatus=='Defaulted')
+loansCompDef$Completed <- ifelse(loansCompDef$LoanStatus=='Completed',1,0)
+```
+
+```{r, echo=FALSE}
+# Histogram plotting function
+hisplot <- function(dataset, x, binwidth) {
+   ggplot(dataset, aes_string(x = x)) + 
+     geom_histogram(fill='blue',binwidth=binwidth)
+}
+# Scatterplot plotting function. xy-limited.
+xylimscplot <- function(dataset, x, y, xlo,xhi,ylo, yhi, alpha) {
+   ggplot(dataset,aes_string(x=x,y=y))+
+    xlim(xlo,xhi)+
+    ylim(ylo, yhi)+
+    geom_jitter(alpha=alpha)
+}
+xylimscplot2 <- function(dataset, x, y, n, xlo,xhi,ylo, yhi, alpha) {
+   ggplot(dataset[sample(nrow(dataset),n),],aes_string(x=x,y=y))+
+    xlim(xlo,xhi)+
+    ylim(ylo, yhi)+
+    geom_jitter(alpha=alpha)
+}
+# Scatterplot plotting function. xy-limited and colored.
+xylimclrscplot <- function(dataset, x, y, c, xlo, xhi, ylo, yhi, alpha) {
+   ggplot(dataset,aes_string(x=x,y=y,color=c))+
+    xlim(xlo, xhi)+
+    ylim(ylo, yhi)+
+    geom_jitter(alpha=alpha)+
+    guides(colour = guide_legend(override.aes = list(alpha = 1)))
+}
+# Scatterplot plotting function. xy-limited and colored.
+xylimclrscplot2 <- function(dataset, x, y, c, n, xlo, xhi, ylo, yhi, alpha) {
+   ggplot(dataset[sample(nrow(dataset),n),],aes_string(x=x,y=y,color=c)) +
+    xlim(xlo, xhi) +
+    ylim(ylo, yhi) +
+    geom_jitter(alpha=alpha) +
+    guides(colour = guide_legend(override.aes = list(alpha = 1)))
+}
+```
+
+###Structure
+
+There are a lot of variables with which to look at loans and their history.
+The read.csv function read in some of the columns as  categorical data types
+that should have been character or logical data types.  Five columns that
+should have Date type required programmatic conversions.  The computation
+of ActualYield, a focus of the analyses made here, makes use
+of ClosedDate and LoanOriginationDate.
+
+```{r, echo=FALSE}
+str(loans)
+```
+
+####Factor variables
+The categorical variables are not ordered by default.  CreditGrade,
+ProsperRating..Alpha, IncomeRange were ordered programatically from
+low to high values.  Null values were positioned after the highest
+value, in each case.  LoanStatus was ordered in rough chronological
+order, with 'Cancelled' positioned last.  LoanOriginationQuarter was
+ordered chronologically, just for completeness.
+
+CreditGrade and ProsperRating..Alpha look similar.  They are two versions of
+credit rating that Prosper applied to its loans at two different time periods.
+
+Null values ("") for CreditGrade and for ProsperRating..Alpha turn out to be
+very common.  When CreditGrade is assigned a true grade then
+ProsperRating..Alpha is assigned a null grade.  Alternatively, when
+ProsperRating..Alpha is assigned a true grade then CreditGrade is assigned a
+null value.
+
+One decision that had to be made is whether or not to combine
+ProsperRating..Alpha and CreditGrade into a new column.  The bar plots for
+ProsperRating..Alpha and CreditGrade uncover significant differences in the
+frequencies of HR (High Risk) and AA (low risk) loans.  I decided not to create
+such a column and to work with ProsperRating..Alpha.
+
+```{r, echo=FALSE}
+plot(ggplot(data=subset(loans,CreditGrade!=""),
+    aes(x=CreditGrade))+
+    geom_bar(fill='blue'))
+plot(ggplot(data=subset(loans,ProsperRating..Alpha!=""),
+        aes(x=ProsperRating..Alpha))+geom_bar(fill='blue'))
+```
+
+Prosper is growing rapidly, so the majority of loans have LoanStatus equal to
+'Current'.  There are a number of categories that apply to active loans that
+are PastDue.  'Cancelled' loans are those rejected by Prosper because initial
+identity verification or credit checks uncover problems.  
+
+```{r, echo=FALSE}
+plot(ggplot(data=loans,aes(x=LoanStatus))+
+  geom_bar(fill='blue')+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)))
+```
+
+The analysis done here ignores the majority of the data because it focuses on inactive
+loans.  That is, loans with LoanStatus values 'Completed', 'Chargedoff' or 'Defaulted'.
+
+```{r, echo=FALSE}
+plot(ggplot(
+  data=subset(loans,
+      LoanStatus %in% c('Defaulted','Chargedoff','Completed','Cancelled')),
+      aes(x=LoanStatus))+
+  geom_bar(fill='blue')+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))+
+  ggtitle("Inactive Loan Status Category Counts"))
+```
+
+The overall economic environment might play havoc with a statistical analysis
+of loan data.  Prosper has been making loans since the last quarter of 2006.
+The data set contains data from that time until the first quarter of 2014.
+The deepest part of the Great Recession: 2008 to 2011 need to be watched
+carefully.
+
+Also, notice the growth in Prosper's loan portfolio in 2013 and 2014.  Most of
+the loans in the data set are current and were originated in this time span.
+
+```{r, echo=FALSE}
+plot(ggplot(
+  data=loans,aes(x=LoanOriginationQuarter))+
+    geom_bar(fill='blue')+
+    theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)))
+```
+
+####Integer variables
+
+CreditScoreRangeLower and CreditScoreRangeUpper are the result of pulling credit
+reports from multiple credit reporting agencies.  They are highly correlated, so
+only CreditScoreRangeUpper is used by the model fit that is output of this
+analysis.  The distribution of this variable is reasonably close to the coveted
+Gaussian distribution.
+
+```{r, echo=FALSE}
+plot(hisplot(loans, "CreditScoreRangeUpper", 20))
+```
+
+EmploymentStatusDuration, CurrentCreditLines, OpenCreditLines,
+TotalCreditLinespast7years, OpenRevolvingAccounts are all pulled from
+borrowers' credit reports.  The columns InquiriesLast6Months and TotalInquiries
+are the number of requests for that credit report.
+
+CurrentDelinquencies, DelinquenciesLast7Years, PublicRecordsLast10Years,
+PublicRecordsLast12Months are obtained by pulling borrowers' credit reports.
+These relate to problems paying off previous loans and previous declarations of
+bankruptcy.
+
+TotalTrades and TradesOpenedLast6Months record credit card activity.
+
+Of this set, only OpenRevolvingAccounts and TotalCreditLinespast7years were
+found to be useful in the model fit.  The others were usually missing too often
+to be predictive.
+
+LoanOriginalAmount is used in the calculation of the ActualYield for a loan.
+It is also used in the calculation of one component of the model used to
+predict loan chargeoffs.
+
+```{r, echo=FALSE}
+plot(hisplot(loans, "LoanOriginalAmount", 100))
+```
+
+####Numeric variables
+
+Numeric variables tend to be of four types: those that come from the
+borrowers' credit report, those that record the borrowers' history with
+previous Prosper loans, those that describe the loan at the time of its
+origination, and those that track the performance of the loan.
+
+Credit report columns include OpenRevolvingMonthlyPayment, AmountDelinquent,
+BankcardUtilization, AvailableBankcardCredit,
+TradesNeverDelinquent..percentage., DebtToIncomeRatio, and StatedMonthlyIncome.
+
+The Prosper loan history columns are ProsperPrincipalBorrowed and
+ProsperPrincipalOutstanding.
+
+Most of these are not populated enough or are not predictive of loan default,
+so most are not used in this statistical analysis.  The exception is
+StatedMonthlyIncome which is used in a synthetic variable SqrtIncomeLoanAmountRatio.
+
+StatedMonthlyIncome has an unusual distribution.  It has a very long tail
+corresonding to a very high monthly income.
+
+```{r, echo=FALSE}
+plot(hisplot(loans, "StatedMonthlyIncome", 1000))
+```
+
+The part of the distribution of StatedMonthlyIncome that is not in the high
+income tail is spiky because loans that are multiples of 100 dollars are
+more common than the alternative.  The binwidth used in the histogram below
+is chosen to suppress this spikiness.  The smoothed histogram looks like a Poisson
+distribution that is trending toward Gaussian goodness.
+
+```{r, echo=FALSE}
+plot(hisplot(subset(loans,StatedMonthlyIncome<20000),"StatedMonthlyIncome", 1000))
+```
+
+The columns that describe the loan at the time of origination are BorrowerAPR,
+BorrowerRate, LenderYield, EstimatedEffectiveYield, EstimatedLoss,
+EstimatedReturn, and MonthlyLoanPayment. InvestmentFromFriendsAmount is fixed
+at loan origination time; its distribution is too close to a delta function at
+the origin to use in my analyses.
+
+EstimatedEffectiveYield was the focus of much of the analyses made here.  Its
+distribution is approximately Gaussian.
+
+```{r, echo=FALSE}
+plot(hisplot(loans,"EstimatedEffectiveYield", 0.01))
+```
+
+The computation of ActualYield, a focus of the analyses made here, makes use
+of the columns LP_CustomerPayments, LP_ServiceFees,
+LP_NonPrincipalRecoverypayments, and LoanOriginalAmount.  These belong to a
+set of columns that track the loan performance from the time of origination to
+the day at which the loan completes or defaults.
+  
+```{r, echo=FALSE}
+plot(hisplot(loans,"LP_CustomerPayments", 100))
+```
+
+Service fees are a cost imposed by Prosper.
+  
+```{r, echo=FALSE}
+plot(hisplot(loans,"LP_ServiceFees", 1))
+```
+
+Principal recovery payments are made by borrowers on charged-offs as
+part of a debt settlement.
+  
+```{r, echo=FALSE}
+plot(hisplot(subset(loans,LP_NonPrincipalRecoverypayments>0),
+      "LP_NonPrincipalRecoverypayments", 100))
+```
+
+####Synthetic
+
+Much of the analysis concerns the difference between EstimatedEffectiveYield
+and the ActualYield obtained by completed loans.
+
+```{r, echo=FALSE}
+plot(ggplot(data=loansCompleted,aes(x=EstimatedEffectiveYield, na.rm=TRUE))+
+  geom_histogram(fill='blue',binwidth=0.01)+
+  xlim(0,0.4))
+```
+
+The histogram of the ActualYield is simpler but similar in form to that for
+EffectiveYield.  It is displaced well to the left (lower yields) than the
+estimated yield provided by Prosper.  This is evidence that, at least by
+some definition of yield, the yield estimates quoted by Prosper are higher
+than the actual yield.
+
+```{r, echo=FALSE}
+plot(ggplot(data=loansCompleted,aes(x=ActualYield, na.rm=TRUE))+
+  geom_histogram(fill='blue',binwidth=0.01)+
+  xlim(0,0.4))
+```
+
+The square root of the ratio of StatedMonthlyIncome and LoanOriginationAmount
+is used in a model to explain loan defaults.  This ratio rather than its
+reciprocal was used to avoid generating NaNs that the R function glm choked on.
+The square root is employed to make the distribution look more Gaussian.  A
+ratio was used in the belief the market should create a situation where size
+should not help in predicting loan defaults.
+
+```{r, echo=FALSE}
+plot(hisplot(loans,"SqrtIncomeLoanAmountRatio", 0.1))
+```
+
+Univariate Analysis
+=======
+###What is the structure of your dataset?
+
+There are 113937 loan events in the data set.  The rows employ 81 variables.
+
+Some of the columns are identifiers.  The values of are not related to anything
+else.  One of these of type int: ListingNumber. The others are of type
+character (hex strings): GroupKey,ListingKey, LoanKey, and MemberKey.
+
+Three of the columns are logical: IsBorrowerHomeowner, CurrentlyInGroup,
+IncomeVerifiable.  All three are used to provide some of the information for a
+borrower's credit profile.
+
+Five of the columns are Dates: ListingCreationDate, ClosedDate,
+DateCreditPulled, FirstRecordedCreditLine, LoanOriginationDate.
+ListingCreationDate, DateCreditPulled, LoanOriginationDate, and ClosedDate mark
+successive transitions in the lifecycle of a loan.  FirstRecordedCreditLine is
+part of the borrower's credit profile.
+
+CreditGrade is a factor column.  It has 9 levels: "", "A", "AA", "B", "C", "D",
+"E", "HR", "NC".  "NC" means no credit history. The null-string value is there
+for loans made 2009 and afterwards.  I ordered these from low to high as follows
+"NC" < "HR" < "E" < "D" < "C" < "B" < "A" < "AA" < "".
+
+ProsperRating..Alpha is a factor column that has 8 levels: "A", "AA", "B", "C",
+"D", "E", "HR", "".  I ordered these from low to high as follows: "HR" < "E" <
+"D" < "C" < "B" < "A" < "AA" < "".  ProsperRating..numeric. associates "HR" with
+1, "E" with 2, and so on up to "AA" which maps to 7.  "" maps to NA.
+
+LoanStatus is a factor column with 12 levels that track the life cycle of a
+loan.  With "Cancelled" placed last and from least desirable to most desirable
+the values are "Defaulted", "Chartedoff", "Past Due (>120 days)",
+"Past Due (91-120 days)", "Past Due (61-90 days)", "Past Due (31-60 days)",
+"Past Due (16-30 days)", "Past Due (1-15 days)", "Current",
+"FinalPaymentInProgress", "Completed", "Cancelled".
+
+BorrowerState is a factor column with 52 levels.  These correspond to the
+states in the United States plus "DC" for the District of Columbia plus "" for
+borrowers not in a state.
+
+Occupation is a factor column with 68 levels.  The values are filled in by the
+borrower when applying for a listing.  Values are Accountant/CPA",
+"Administrative Assistant", and so  on.  "" is the null assignment.
+
+EmploymentStatus is a factor column.  Values are "", "Employed", "Full-time",
+"Not available", "Not employed","Other","Part-time","Retired","Self-employed".
+Unordered.
+
+IncomeRange is a factor column that categorizes borrower income.  The values
+are as follows: "$0", "$100,000+", "$1-24,999", "$25,000-49,999",
+"$50,000-74,999", "$75,000-99,999", "Not displayed",  and "Not employed".
+I ordered these as follows: "Not employed" < "$0" < "$1-24,999" <
+"$25,000-49,999" < "50,000-74,999" < "$75,000-99,999" < "$100,000+" <
+"Not displayed".
+
+LoanOriginationQuarter is a factor column with 33 levels.  Examples are
+"Q1 2006", "Q2 2006", and so on.  I ordered these in time order from earliest
+to latest.
+
+Columns that are filled in by the time the credit reports are pulled are used
+to provide a credit report profile to investors. Those not already mentioned
+include EmploymentStatusDuration, CreditScoreRangeLower, CreditScoreRangeUpper,
+FirstRecordedCreditLine, CurrentCreditLines, OpenCreditLines,
+TotalCreditLinespast7years, OpenRevolvingAccounts, OpenRevolvingMonthlyPayment,
+InquiriesLast6Months, TotalInquiries, CurrentDelinquencies, AmountDelinquent,
+PublicRecordsLast10Years, PublicRecordsLast12Months, RevolvingCreditBalance,
+BankcardUtilization, AvailableBankcardCredit, TotalTrades,
+TradesNeverDelinquent..percentage, TradesOpenedLast6Months, DebtToIncomeRatio,
+;IncomeRange, IncomeVerified, and StatedMonthlyIncome.
+
+A second set of columns describe the credit-worthiness of the borrower in terms
+of past history with Prosper loans: TotalProsperLoans,
+TotalProsperPaymentsBilled, OnTimeProsperPayments,
+ProsperPaymentsLessThanOneMonthLate, ProsperPaymentsOneMonthPlusLate,
+ProsperPrincipalBorrowed, and ProsperPrincipalOutstanding.  For loans prior to
+September 2013: ScorexChangeAtTimeOfListing.  There are not enough repeat
+borrowers to make these very interesting.
+
+Some 16 columns are used to track the current financial state of a loan:
+LoanCurrenDaysDelinquent, LoanFirstDefaultedCycleNumber,
+LoanMonthsSinceOrigination, LoanNumber, LoanOriginalAmount, LoanOriginationDate,
+MonthlyLoanPayment, LP_CustomerPayments, LP_CustomerPrincipalPayments,
+LP_InterestandFees, LP_ServiceFees, LP_CollectionFees, LP_GrossPrincipalLoss,
+LP_NetPrincipalLoss, and LP_NonPrincipalRecoverypayments.
+
+Recommendations, InvestmentFromFriendsCount, InvestmentFromFriendsAmount, and
+Investors track listing properties before the loan is originated.
+
+BorrowerAPR is the annualized interest rate on the loan.  BorrowerRate is the
+interest rate on the loan, which is compounded daily.  The LenderYield is the
+BorrowerRate minus a borrower's fee (1%).
+
+EstimatedEffectiveYield is equal to the BorrowerRate minus a servicing fee
+rate minus the estimated uncollected interest on chargeoffs plus estimated
+collected late fees on chargeoffs.
+
+EstimatedLoss is the probability that a loan will become a chargeoff.
+
+EstimatedReturn is equal to EstimatedEffectiveYield minus EstimatedLoss.
+
+###What are the main feature(s) of interest in your dataset?
+
+My goals were to (1) estimate the actual yield for the different ProsperRatings
+and compare these against the EstimatedEffectiveYield offered by Prosper, and
+(2) find variables that predict loan chargeoff and eventual default.
+
+The main features of interest for the first goal are LoanStatus,
+EstimatedEffectiveYield, and the synthetic column ActualYield.
+
+The columns for the second goal that were actually used are:
+CreditScoreRangeUpper, OpenRevolvingAccounts, InquiriesLast6Months, the
+synthetic column SqrtIncomeLoanAmountRatio, TotalCreditLinespast7years,
+CurrentDelinquencies, DelinquenciesLast7Years, and OpenRevolvingMonthlyPayment.
+
+###What other features in the dataset do you think will help support your investigation into your feature(s) of interest?
+
+ActualYield is calculated from ClosedDate, LoanOriginationDate,
+LP_CustomerPayments, LP_ServiceFees, LP_NonPrincipalRecoverypayments, and
+LoanOriginalAmount.  The analysis compares the actual yield with the
+EstimatedEffectiveYield offered by Prosper.
+
+ProsperRating..Alpha was used to understand the EstimatedEffectiveYield and
+ActualYield.
+
+I performed a logistic regression and used the coefficients to construct a
+synthetic column: GLMFit7.  There used to be GLMFit columns that were used
+to eliminate columns that relate to credit worthiness but failed to have
+predictive value.
+
+###Did you create any new variables from existing variables in the dataset?
+
+LoansOriginationQuarter is a factor column.  A typical entry value is
+'Q1 2011'.  This column was used to generate two new integer-valued columns:
+Quarter and Year.
+
+CompleteDays, defined for completed loans and chargeoffs, was calculated by
+subtracting LoanOriginationDate from ClosedDate and then converting the result
+to a numeric. 
+
+ActualYield, defined for completed loans and chargeoffs, was calculated using
+the interest rate formula.  Assuming compounding by day, the formula for this
+is $$ActualYield = 365 * (((LP\_CustomerPayments + LP\_ServiceFees + LP\_NonPrincipalRecoverypayments)$$
+$$/LoanOriginalAmount)^{(1.0/CompleteDays)}-1.0)$$.  This R formula has bad numerical properties, so it was rewritten as $$ActualYield = 365 * (exp(log((LP\_CustomerPayments + LP\_ServiceFees + LP\_NonPrincipalRecoverypayments)$$
+$$/LoanOriginalAmount)*{(1.0/CompleteDays)})-1.0)$$.  The assumption that interest is compounded daily comes from footnotes in one of Prosper's web pages.
+
+As noted above, I performed a logistic regression and used the coefficients
+to construct a synthetic column: GLMFit7.
+$$GLMFit7 = -3.9950 + 0.008386 * CreditScoreRangeUpper + 0.02125 * OpenRevolvingAccounts - $$
+$$                 0.1209 * InquiriesLast6Months + 1.013 * SqrtIncomeLoanAmountRatio -$$
+$$                0.009103 * TotalCreditLinespast7years - 0.1113 * CurrentDelinquencies +$$
+$$                0.009992 * DelinquenciesLast7Years - 0.000507 * OpenRevolvingMonthlyPayment$$
+
+The feature Completed was added to the subset of the data with LoanStatus
+values 'Completed', 'Chargedoff', or 'Defaulted'.  This is a boolean
+used in the logistic regression that calculated the coefficients used
+to construct GLMFit7 (and other fits not mentioned here).
+
+###Of the features you investigated, were there any unusual distributions? Did you perform any operations on the data to tidy, adjust, or change the form of the data? If so, why did you do this?
+
+I investigated all of the features that have distributions, even those not directly relevant to the analysis.  There were a lot of interesting non-Gaussian distributions, some irregular.  In order of appearance in the R environment:
+
+Feature                  |  Distribution | Comments
+------------------------ | ------------- | -------------------
+BorrowerAPR              |  Gaussian    | Spikes superimposed
+BorrowerRate             |   Gaussian  |   Spikes superimposed
+LenderYield              |  Gaussian    | Spikes superimposed
+EstimatedEffectiveYield  |   Poisson  |   Spikes superimposed
+EstimatedLoss           | Poisson     | Spikes superimposed
+EstimatedReturn         |   Gaussian |
+ProsperScore            |   Gaussian |
+EmploymentStatusDuration | Exponential |
+CreditScoreRangeLower   |   Gaussian |
+CreditScoreRangeUpper    |  Gaussian |
+CurrentCreditLines      |   Poisson |
+OpenCreditLines         |   Poisson |
+TotalCreditLinespast7years | Poisson   |   Excess at origin
+OpenRevolvingAccounts   |   Poisson  |    Excess at origin
+InquiriesLast6Months    |   Exponential |
+TotalInquiries          |   Exponential |
+CurrentDelinquencies    |   Exponential |
+DelinquenciesLast7Years   | Spike at origin + Exponential |
+PublicRecordsLast10Years  | Exponential |
+PublicRecordsLast12Months | Delta function |
+OpenRevolvingMonthlyPayment | Exponential |
+AmountDelinquent          | Spike at origin + Exponential |
+BankcardUtilization       | Irregular |
+AvailableBankcardCredit   | Exponential |
+TotalTrades               | Poisson |
+TradesOpenedLast6Months   | Exponential |
+TradesNeverDelinquent..percentage     | Beta | Peaked near 1.0
+DebtToIncomeRatio         | Gaussian | Long, non-Gaussian tail.
+StatedMonthlyIncome       | Gaussian | Many superposed spikes.  Long, non-Gaussian tail.
+LoanCurrentDaysDelinquent  | Spike at origin + Irregular, multimodal |
+LoanFirstDefaultedCycleNumber | Poisson |           Gap at cycles 2,3, and 4
+LoanOriginalAmount | Gaussian |
+MonthlyLoanPayment | Irregular | Multimodal with large spikes
+LP_CustomerPayments | Spike at origin + exponential | 
+LP_CustomerPrincipalPayments | Exponential | Many superposed spikes
+LP_InterestAndFees | Spike at origin + exponential | Chargedoffs contribute an exponential
+LP_ServiceFees | Spike at origin + exponential | Chargedoffs contribute an exponential
+LP_CollectionFees | Spike at origin + exponential | Chargedoffs contribute an exponential
+LP_GrossPrincipalLoss | Poisson | Excess near origin
+LP_NetPrincipalLoss | Poisson | Excess near origin
+LP_NonPrincipalRecoveryPayments | Exponential |
+Recommendations | Spike at origin + exponential |
+InvestmentFromFriendsCount | Spike at origin + exponential |
+InvestmentFromFriendsAmount |  Spike at origin + exponential |
+SqrtIncomeLoanAmountRatio | Poisson |
+
+Bivariate Plots
+==
+###Actual Yield and EstimatedEffectiveYield
+
+Actual yields for C, D, E, and HR are not appreciably different from one another.  Actual yield differences are visible to the naked eye in historgrams for AA, A, and B grade loans.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(ggplot(data=subset(loansCompleted,ProsperRating..Alpha!=""),
+        aes(x=ActualYield))+
+    geom_histogram(fill='blue',binwidth=0.01)+xlim(0,0.5)+
+    facet_wrap(~ProsperRating..Alpha))
+```
+
+Actual yields are usually less than the estimated effective yields quoted by
+Prosper at the time of origination.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimscplot2(subset(loansCompleted, ProsperRating..Alpha!=""),
+    "EstimatedEffectiveYield", "ActualYield",
+    3000, 0, 0.3, 0, 0.40, 0.5))
+```
+
+There is evidence that the larger economy had a significant impact on yields.
+Yields, estimated and actual both shifted upwards in 2011.  The shift
+in EstimatedEffectiveYield reflects Prosper's view of the economic
+environment.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimscplot2(loansCompleted,
+    "Year", "EstimatedEffectiveYield",
+    3000, 2007, 2014, 0, 0.5, 0.5))
+```
+
+ActualYields nudged upwards in 2011, reflecting a change in interest rates
+from two or three years before.  The effect is less dramatic than that seen
+in EstimatedEffectiveYield because loans are paid off in roughly two years
+and because there is a spread of loan terms.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimscplot2(loansCompleted,
+    "Year", "ActualYield",
+    3000, 2007, 2014, 0, 0.4, 0.5))
+```
+
+###Credit Rating Dependence or Independence
+
+What variables might predict loan defaults.  Credit scores claim to do this.  Are there other variables?
+
+The range of credit scores reported out of credit agencies are recorded in
+CreditScoreRangeLower and CreditScoreRangeUpper.  These are highly correlated.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimscplot2(loansFinished,
+    "CreditScoreRangeLower", "CreditScoreRangeUpper",
+    500, 500, 900, 500, 900, 0.5))
+```
+
+The logistic regression used to generate a model for charged-offs uses eight
+variables.  There are 27 pairs of variables among these.  I looked at all of
+pairs and did not find any strong correlations.  Since highly correlated
+variables are undesirable in regressions, this is a good thing.
+
+The remaining bivariate scattergrams looks only at loans that
+have status Completed, Chargedoff, or Defaulted.  Active loans are of no
+interest in an analysis that tries to find predictors of default.
+
+An example of a correlated pair is comprised of CurrentDelinquencies and
+and TotalCreditLinespast7years. The correlation is there, but it is not
+overwhelming.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimscplot2(loansFinished,
+    "OpenRevolvingAccounts", "CreditScoreRangeUpper", 
+    2500, 0, 30, 500, 900, 0.2))
+```
+
+An second example of a correlated pair of columns is that of
+TotalCreditLinespast7years and OpenRevolvingAccounts.  The strength of the
+correlation is roughly the same as that for TotalCreditLinespast7years
+and CurrentDelinquencies.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimscplot2(loansFinished,
+    "OpenRevolvingAccounts", "TotalCreditLinespast7years", 
+    2500, 0,25, 0, 75, 0.2))
+```
+
+An even more weakly correlated pair of columns is that of
+TotalCreditLinespast7years and SqrtIncomeLoanAmountRatio.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimscplot2(loansFinished,
+    "SqrtIncomeLoanAmountRatio", "TotalCreditLinespast7years", 
+    2500, 0, 3, 0, 100, 0.2))
+```
+
+TotalCreditLinespast7years and CurrentDelinquencies have a lack of correlation
+that is more typical of the pairs of variables in this study.  This one is of
+more interesting than most, but the reason is in the MultiVariate Plots section
+(see below).  
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimscplot2(loansFinished,
+    "CurrentDelinquencies", "TotalCreditLinespast7years",
+     2500, 0, 5, 0, 100, 0.2))
+```
+
+The logistic model fit (discussed near the end) correlates strongly with credit
+score. This is not surprising, because credit score is a component of the
+model.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimscplot2(loansFinished,
+    "GLMFit7", "CreditScoreRangeUpper", 
+    2500, 0, 5, 500, 900, 0.2))
+```
+
+Bivariate Analysis
+==
+
+###Talk about some of the relationships you observed in this part of the investigation. How did the feature(s) of interest vary with other features in the dataset?
+
+EstimatedEffectiveYield and ActualYield were correlated.  The correlation is
+not as high as investors might like.  EstimatedEffectiveYield is almost always
+higher than ActualYield.  A typical loan yield is about 2/3 the amount
+estimated by Prosper at the time the loan originates.  This conclusion is
+based only on the performance of loans that complete; including chargeoffs
+would decrease the performance even more.
+
+The logistic model fit (discussed near the end) correlates with credit score.
+This is good news because it is the point of the analysis. Also, it is not
+surprising, as credit score is one of the variables in the fit's formula.
+
+None of the variables that came with the data set that one would normally
+associate with credit worthiness correlated very well with the credit scores.
+
+###Did you observe any interesting relationships between the other features (not the main feature(s) of interest)?
+
+EstimatedEffectiveYield and ActualYield were correlated.
+EstimatedEffectiveYield was systematically higher than ActualYield because of
+loan prepayment.
+
+For variables that might predict loan default?  No! The correlations were
+between variables that one would expect to be highly correlated.  One of the
+main conclusions that can be drawn is that no single factor known to be used
+in credit score calculations significantly correlates with credit scores.
+The variables that were chosen to explain loan default were not highly
+correlated with each other.
+
+###What was the strongest relationship you found?
+
+CreditScoreRangeLower and CreditScoreRangeUpper.  The relationship between
+CrediScoreRangeUpper and GLMFit7 is also strong.
+
+Multivariate Plots
+==
+###ActualYield
+
+As already noted, ActualYield and EstimatedEffectiveYield are positively
+correlated. 
+
+There are actually two triangular regions in the scatterplot.  The fainter
+one is displaced by 10% upwards from the one that starts near the origin.
+This is probably a reflection of opportunities available to those brave
+enough to loan money in 2009 when the banking sector was closed down.
+
+The 2008-2009 ghost is evidence that the relationship between
+EstimatedEffectiveYield, the predicted risk, and ActualYield, the actual
+return, has been more or less time-independent since 2011.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimclrscplot2(
+  subset(loansCompleted,ProsperRating..Alpha!=""),
+  "EstimatedEffectiveYield", "ActualYield", "ProsperRating..Alpha",
+  3000, 0, 0.3, 0, 0.4, 0.5))
+```
+
+When plotted as a function of time, the ActualYield values observed separate
+into bands that correspond to the ratings that prosper offered before the
+loan was originated.  Note the upward shift in 2011, reflective of conditions
+in years 2008 and 2009.
+
+The color banding in the scatterplot corresponds to Prosper's credit rating.
+One unexpected feature is red spot in 2012 with yields > 0.25 that corresponds
+to high risk (HR) loan activity.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimclrscplot2(loansCompleted,
+    "Year", "ActualYield", "ProsperRating..Alpha",
+    3000, 2007, 2014, 0, 0.4, 0.5))
+```
+
+###Credit Worthiness Over Time
+
+CreditScoreRangeUpper predicted chargedoff and default statuses reasonably well.
+
+There are outliers for which the credit score is 0.  This is impossible in the real
+world and must be assignments made Prosper to fill in for missing data.
+
+The different spreads in credit scores in 2009 is caused by a change in banking
+practice on the part of Prosper.  They switched credit rating methodology in that
+year.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimclrscplot2(loansFinished,
+    "Year","CreditScoreRangeUpper", "LoanStatus",
+    3000, 2007, 2014, 500, 900, 0.5))
+```
+
+###Credit Worthiness Variable Dependence and Loan Completion Status
+
+Adding LoanStatus as a color to the bivariate scattergrams might tell us something
+about the predictive power of the columns used in the model fit.  Defaulted and
+chargedoff loans are to the lower left in the scattergram of CreditScoreRangeUpper
+versus OpenRevolvingAccounts.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimclrscplot2(loansFinished, 
+    "OpenRevolvingAccounts", "CreditScoreRangeUpper","LoanStatus",
+    2500, 0, 30, 500, 900, 0.2))
+```
+
+For the pairing of TotalCreditLinespast7years and OpenRevolvingAccounts, more of
+the separation by loan status seems to be accomplished by OpenRevolvingAccounts.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimclrscplot2(loansFinished,
+    "OpenRevolvingAccounts", "TotalCreditLinespast7years", "LoanStatus",
+    2500, 0,25, 0, 75, 0.2))
+```
+
+An third example of a relatively strongly correlated pair is TotalCreditLinespast7years
+and SqrtIncomeLoanAmountRatio.  More of the separation of loans by status is accomplished
+by the synthetic column SqrtIncomeLoanAmountRatio.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimclrscplot2(loansFinished,
+    "SqrtIncomeLoanAmountRatio", "TotalCreditLinespast7years", "LoanStatus",
+    2500, 0, 3, 0, 100, 0.2))
+```
+
+A poorly correlated pair is comprised of CurrentDelinquencies and
+TotalCreditLinespast7years.  The separation is accomplished more by dependence
+on CurrentDelinquencies than by TotalCreditLinespast7years.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimclrscplot2(loansFinished,
+    "CurrentDelinquencies", "TotalCreditLinespast7years", "LoanStatus",
+    2500, 0, 5, 0, 100, 0.2))
+```
+
+The logistic model fit (discussed near the end) correlates with credit score.
+This is not surprising, because credit score is a component of the model.  The
+separation by loan status is more horizontal than vertical.  This makes sense,
+because the model fit should be stronger than CreditScoreRangeUpper.
+
+```{r, echo=FALSE,warning=FALSE}
+plot(xylimclrscplot2(loansFinished,
+    "GLMFit7", "CreditScoreRangeUpper", "LoanStatus",
+    2500, 0, 5, 500, 900, 0.2))
+```
+
+Multivariate Analysis
+==
+
+###Talk about some of the relationships you observed in this part of the investigation. Were there features that strengthened each other in terms of looking at your feature(s) of interest?
+
+ActualYield and EstimatedEffectiveYield are strongly correlated.  Prosper's
+estimated effective yield overstates the values of its loans.  The scatterplot,
+colored with Loan Status, displays banding that correlates with the estimated
+yield.  This is an obvious relationship as the loan terms are set at the same
+time as the effective yiel is calculated.
+
+There are actually two bands of correlation between ActualYield and
+EstimatedEffectiveYield.  These probably correspond to loans orginated before
+and after 2009.
+
+No single variable other than the credit scores predicted loan default.  Most
+column pairs that were examined were no better at predicting loan default.
+There are hints that BankcardUtilization and DebtToIncomeRatio might help.
+Real progress on the problem was not made until models were tried.
+
+###Were there any interesting or surprising interactions between features?
+
+Successively adding CreditScoreRangeUpper, OpenRevolvingAccounts,
+InquiriesLast6Months, SqrtIncomeLoanAmountRatio, TotalCreditLinespast7years,
+CurrentDelinquencies, DelinquenciesLast7Years, and OpenRevolvingMonthlyPayment
+generates a sequence of models that predict whether or not a loan is in
+Defaulted or Chargedoff as opposed to Completed status.
+
+###OPTIONAL: Did you create any models with your dataset? Discuss the strengths and limitations of your model.
+
+Using a subset of the loans that included only those that included defaulted
+and completed loans, I attempted to use various combinations of variables to
+predict loan defaults.  The R function for logistic regression is glm with
+family set to binomial.  The quality of the fit was judged by comparing the
+residual deviance to the null deviance in the output.
+
+As a base point, logistic regression was used where the only independent
+variable is CreditScoreRangeUpper.
+
+```{r, echo=FALSE,warning=FALSE}
+glmf1 <- glm(Completed ~  CreditScoreRangeUpper,
+    data=loansCompDef,
+    family=binomial)
+summary(glmf1)
+```
+The difference $Residual Deviance - Null Deviance$ reported is 2430.
+
+By trial and error among the variables that are pulled from the borrower's
+credit report and excluding the credit score, it was found that
+OpenRevolvingAccounts, InquiriesLast6Months,
+LoanOriginalAmount/StatedMonthlyIncome are reasonable predictors.
+
+```{r, echo=FALSE,warning=FALSE}
+glmf2 <- glm(Completed ~  OpenRevolvingAccounts+
+ InquiriesLast6Months+SqrtIncomeLoanAmountRatio,
+    data=loansCompDef,
+    family=binomial,
+    na.action=na.omit)
+summary(glmf2)
+```
+
+The difference $Residual Deviance - Null Deviance$ reported is 1780.
+This is almost as good as the analysis using credit scores with the
+largest contribution coming from the count of credit report inquiries
+made in the last 6 months.
+
+Adding all variables from the credit score group that actually caused the
+deviance difference to improve, the following model was arrived at:
+
+```{r, echo=FALSE,warning=FALSE}
+glmf7 <- glm(Completed ~  
+    CreditScoreRangeUpper+OpenRevolvingAccounts+InquiriesLast6Months+
+    SqrtIncomeLoanAmountRatio+TotalCreditLinespast7years+CurrentDelinquencies+
+    DelinquenciesLast7Years+OpenRevolvingMonthlyPayment,data=loansCompDef,
+    family=binomial)
+summary(glmf7)
+```
+
+The difference $Residual Deviance - Null Deviance$ reported is 4182.
+
+```{r, echo=FALSE,warning=FALSE}
+#Confidence intervals, using log-likelihood, for the coefficients of the
+#fit can be calculated using the aod library.  The result is
+#   confint(glmf7)
+```
+
+Final Plots and Summary
+====
+
+###Actual Yield < EstimatedEffectiveYield
+
+The estimated yields that Prosper offers for its loans are systematically
+higher than the yields actually attained. The densities for the two are
+plotted on top of one another below.  The density is a normalized histogram
+so the superposition makes mathematical sense.  The density for the actual
+yield peaks at lower values
+
+```{r, echo=FALSE, warning=FALSE}
+ayield <- loansCompleted$ActualYield
+pyield <- loansCompleted$EstimatedEffectiveYield
+yield <- c(ayield, pyield)
+afact <- c(rep(0,length(ayield)), 
+    rep(1,length(pyield)))
+afac <- factor(
+  c(rep(0,length(ayield)), rep(1,length(pyield))), levels=c(0,1), 
+  labels=c("ActualYield", "EstimatedEffectiveYield"))
+yielddf <- data.frame(yield, afac)
+plot(ggplot(data=yielddf,aes(x=yield,fill=afac)) +
+  geom_density(alpha=0.3) +
+  xlim(0,0.50) +
+  ggtitle("Actual and Predicted Loan Yield Densities"))
+```
+
+```{r, echo=FALSE,warning=FALSE}
+#plot(ggplot(data=loansCompleted,aes(x=ActualYield))+
+#  geom_histogram(fill='blue',binwidth=0.01)+
+#  scale_x_continuous(limits=c(0.0,0.4))+
+#  ggtitle("Histogram of Actual Yield"))
+#plot(ggplot(data=loansCompleted,aes(x=EstimatedEffectiveYield))+
+#  geom_histogram(fill='blue',binwidth=0.01)+
+#  scale_x_continuous(limits=c(0.0,0.4))+
+#  ggtitle("Histogram of Predicted Yield"))
+```
+
+The reason for the discrepancy between actual and predicted yields is
+that a high percentage of Prosper loans are paid off early.  In order
+to achieve the returns advertised by Prosper, lenders should be
+prepared to reinvest prepaid loan proceeds immediately on receipt.
+
+The synthetic column CompleteDays divided by the term of the loan
+measures how close to full term the loan is when it is in Completed
+status.  The histogram of this formula shows that many loans go to
+full term, but the majority are paid off early.
+
+```{r, echo=FALSE}
+plot(ggplot(loansCompleted, aes_string(x = "CompleteDays/Term/30")) + 
+    geom_histogram(fill='blue',binwidth=0.025) +
+    scale_x_continuous("Fraction of Loan Term (unitless)") +
+    ggtitle("Histogram of Fraction of Term at Completion"))
+```
+
+###Credit Worthiness Over Time Using a Model Fit
+
+Predicting loan default and chargeoff status using variables and pairs of
+variables in the raw data set did not work.  Combinations of variables
+using a logistic regression fit discovered a combination that performs
+better than credit scores.  In the plot below, the defaults and chargeoffs
+show up as red and green dots while successfully completed loans are
+described by blue dots.  Red and green dots appear in general below the
+blue dots, so the fit does tend to divide loans into unsucccessful and
+successful categories.
+
+A model fit, GLMFit7, was obtained that is a linear combination of the
+features CreditScoreRangeUpper, OpenRevolvingAccounts, InquiriesLast6Months,
+SqrtIncomeLoanAmountRatio, TotalCreditLinespast7years, CurrentDelinquencies,
+DelinquenciesLast7Years, and OpenRevolvingMonthlyPayment to predict loan
+disposition.  The data for the fit is the subset of the data that was in
+'Completed', "Chargedoff", and 'Defaulted' loan status.  The model attempts
+to map the input attributes to 1 for 'Completed' and 0 for 'Chargedoff'
+and 'Defaulted' loans.
+
+The target of the fit is a synthetic variable that takes the values 0 and 1.
+The predictions final plot below is a plot of inv.logit(GLMFit7) versus time.
+The result of applying inv.logit is a floating point number between 0 and 1.
+Very roughly, the vertical axis is related to the "probability" of successful
+loan completion.  To avoid overplotting, a low power of this "probability"
+is used as a vertical plot axis.
+
+The fact that red (Defaulted) and green (Chargedoff) points plot predominantly
+below blue (Completed) points is the point of the analysis.  The
+separation between unsuccessful and successful zones in the scatterplot is
+not sharp and varies from year to year. 
+
+```{r, echo=FALSE,warning=FALSE}
+plot(ggplot(
+  data=loansFinished[sample(nrow(loansFinished),2000),],
+    aes(x=Year,y=inv.logit(GLMFit7)^3,color=LoanStatus))+
+  geom_jitter(alpha=0.50)+
+  xlim(2007,2013)+
+  scale_y_continuous(name="3rd Power of Logistic Regression Fit (unitless)")+
+  ggtitle("Loan Status Model Fit Versus Time")+
+  guides(colour = guide_legend(override.aes = list(alpha = 1))))
+```
+
+The relationship between logistic regression fit output and the probability of
+default looks strong enough to take the next step.  It might be possible to
+create a tool that, given a probability of default, outputs a logistic regression
+threshhold that can guarantee that level of risk.
+
+Reflection
+===
+
+I explored two questions: (1) are Prosper's estimates of loan yield
+accurate and (2) is there a good way to predict loan chargeoff and default?
+
+Estimating the actual yield was straighforward.  Chasing down the definition
+of yield from Prosper's web pages, determining that loans are compounded
+monthly, and applying the interest rate formula was all that was required
+to calculate the true yield.
+
+The Udacity lectures advocate using alpha and geom_jitter to
+counter overplotting.  For some datasets, subsampling dataframes by row
+yields crisper plots that are freer of overplotted points.  The technique
+works as long as there are no systematic trends in the dataframe that is
+getting sampled.  The R code 'ggplot(df[sample(nrow(df),n),],aes_string(x=x,y=y))'
+accomplishes this task.
+
+To finish off the analysis of actual vs predicted yield, would require
+applying an interest rate to the value of the funds at loan completion and
+projecting the earnings out to the full term of each of the loans.  Picking
+the appropriate interest rate at the time the loans finished is the hard
+part of this calculation.
+
+Predicting loan default proved to be much harder than I thought it would be.
+I started off by producing a massive number of scattergrams and time history
+plots looking for correlations or variables that separated successful and
+unsuccessful loans.
+
+This effort failed.  Techniques of descriptive statistics alone were not
+really up to the task of predicting loan default.  To crack the problem
+required model fitting (many iterations) to determine a linear combination
+of the available features to uncover hidden patterns.  Scatterplots are
+two or three (with color).  The space of attributes that predicts loan
+defaults is closer to ten.
+
+The strategy that eventually worked was to invert the order of operations
+laid out for Project 3.  That is, to start out with a model fit and then
+generate scattergrams that validate the model.  By adding more and more
+variables, a sequence of models were discovered that eventually was able
+to successfully separate out a large fraction of the successful loans
+from the successful loans.
+
+Extensions to the loan status prediction problem include scaling the
+input variables so that they are unitless, trimming outliers before model
+fitting, getting real confidence intervals on the coefficients.
+
+
+
+
